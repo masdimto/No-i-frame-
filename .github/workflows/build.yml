@@ -1,1 +1,33 @@
+name: Build TShock Plugin
 
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build & Rename DLL
+        run: |
+          dotnet build -c Release --no-restore
+          cp bin/Release/net9.0/Plugin.dll bin/Release/net9.0/ShopAndAnglerBuff.dll
+
+      - name: Upload Single DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShopAndAnglerBuff
+          path: bin/Release/net9.0/ShopAndAnglerBuff.dll
