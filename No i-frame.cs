@@ -2,7 +2,6 @@ using System;
 using Microsoft.Xna.Framework;
 using Terraria;
 using Terraria.DataStructures;
-using Terraria.Localization;
 using TerrariaApi.Server;
 using TShockAPI;
 
@@ -12,11 +11,10 @@ namespace NoIFramePlugin
     public class NoIFrame : TerrariaPlugin
     {
         public override string Name => "NoIFrame";
-        public override Version Version => new Version(1, 2, 0);
+        public override Version Version => new Version(1, 3, 0);
         public override string Author => "CustomPlugin";
-        public override string Description => "True Multiplayer 0 I-Frame: Menghilangkan jeda kebal baik pada pemain (server-side hitbox) maupun musuh/bos.";
+        public override string Description => "True Multiplayer 0 I-Frame: Memotong HP pemain secara paksa via paket PlayerHp & mereset i-frame musuh/bos.";
 
-        // Melacak berapa tick pemain sudah menempel di hitbox musuh/proyektil
         private int[] contactTicks = new int[Main.maxPlayers];
 
         public NoIFrame(Main game) : base(game) { }
@@ -45,7 +43,7 @@ namespace NoIFramePlugin
 
         private void OnGameUpdate(EventArgs args)
         {
-            // 1. Reset semua i-frame pada MUSUH & BOS (100% server-side)
+            // 1. Reset semua i-frame pada MUSUH & BOS
             for (int n = 0; n < Main.maxNPCs; n++)
             {
                 NPC npc = Main.npc[n];
@@ -59,7 +57,7 @@ namespace NoIFramePlugin
                 }
             }
 
-            // 2. Reset i-frame PEMAIN & Paksa Hitbox Damage Multiplayer
+            // 2. Reset i-frame PEMAIN & Paksa Potong HP saat menyentuh hitbox musuh/proyektil
             for (int i = 0; i < Main.maxPlayers; i++)
             {
                 TSPlayer tsPlayer = TShock.Players[i];
@@ -84,13 +82,11 @@ namespace NoIFramePlugin
                         player.hurtCooldowns[c] = 0;
                 }
 
-                // Cek tabrakan aktif dengan Musuh atau Proyektil Hostile di server
                 Rectangle playerHitbox = player.Hitbox;
-                int incomingDamage = 0;
+                int rawDamage = 0;
                 string killerName = "Musuh";
-                int hitDirection = 0;
 
-                // Cek sentuhan badan musuh / bos
+                // Cek sentuhan dengan badan musuh / bos
                 for (int n = 0; n < Main.maxNPCs; n++)
                 {
                     NPC npc = Main.npc[n];
@@ -98,16 +94,15 @@ namespace NoIFramePlugin
                     {
                         if (playerHitbox.Intersects(npc.Hitbox))
                         {
-                            incomingDamage = npc.damage;
+                            rawDamage = npc.damage;
                             killerName = npc.FullName;
-                            hitDirection = player.Center.X < npc.Center.X ? -1 : 1;
                             break;
                         }
                     }
                 }
 
-                // Jika tidak menempel badan musuh, cek proyektil musuh/bos (laser, peluru, bola api)
-                if (incomingDamage == 0)
+                // Cek sentuhan dengan proyektil musuh / bos
+                if (rawDamage == 0)
                 {
                     for (int p = 0; p < Main.maxProjectiles; p++)
                     {
@@ -116,34 +111,50 @@ namespace NoIFramePlugin
                         {
                             if (playerHitbox.Intersects(proj.Hitbox))
                             {
-                                incomingDamage = proj.damage * 2;
+                                rawDamage = proj.damage * 2;
                                 killerName = Lang.GetProjectileName(proj.type).Value;
                                 if (string.IsNullOrWhiteSpace(killerName))
                                     killerName = "Serangan Musuh";
-                                hitDirection = player.Center.X < proj.Center.X ? -1 : 1;
                                 break;
                             }
                         }
                     }
                 }
 
-                if (incomingDamage > 0)
+                if (rawDamage > 0)
                 {
                     contactTicks[i]++;
 
-                    // Tick ke-1 dibiarkan dihitung HP pemain sendiri; mulai tick ke-3 dan kelipatan 2 server memaksa tembus i-frame
-                    if (contactTicks[i] >= 3 && contactTicks[i] % 2 == 1)
+                    // Tick 1 dibiarkan dihitung HP pemain; mulai Tick 2 dst server langsung memotong HP tanpa peduli i-frame!
+                    if (contactTicks[i] >= 2)
                     {
-                        PlayerDeathReason reason = PlayerDeathReason.ByCustomReason($"{player.name} tewas seketika oleh {killerName} (0 I-Frame)!");
-                        NetMessage.SendPlayerHurt(
-                            i,
-                            reason,
-                            incomingDamage,
-                            hitDirection,
-                            false,
-                            false,
-                            -1
-                        );
+                        // Hitung pengurangan damage berdasarkan Defense pemain (Normal 0.5x, Expert 0.75x, Master 1.0x)
+                        float defFactor = Main.masterMode ? 1.0f : (Main.expertMode ? 0.75f : 0.5f);
+                        int finalDamage = Math.Max(1, (int)(rawDamage - (player.statDefense * defFactor)));
+
+                        // Kurangi Endurance (misal Worm Scarf / Endurance Potion)
+                        if (player.endurance > 0f)
+                        {
+                            finalDamage = Math.Max(1, (int)(finalDamage * (1f - player.endurance)));
+                        }
+
+                        player.statLife -= finalDamage;
+
+                        // Tampilkan angka merah damage di atas kepala pemain
+                        CombatText.NewText(playerHitbox, CombatText.DamagedFriendly, finalDamage, false, true);
+
+                        if (player.statLife <= 0)
+                        {
+                            player.statLife = 0;
+                            NetMessage.SendData((int)PacketTypes.PlayerHp, -1, -1, null, i);
+                            PlayerDeathReason reason = PlayerDeathReason.ByCustomReason($"{player.name} tewas seketika oleh {killerName} (0 I-Frame)!");
+                            tsPlayer.KillPlayer();
+                        }
+                        else
+                        {
+                            // Paksa kirim update HP terbaru ke HP pemain (tidak bisa diblokir i-frame client!)
+                            NetMessage.SendData((int)PacketTypes.PlayerHp, -1, -1, null, i);
+                        }
                     }
                 }
                 else
